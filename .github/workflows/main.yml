@@ -1,0 +1,57 @@
+name: Build Unsigned IPA
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.20'
+
+      - name: Install dependencies
+        run: |
+          npm install
+          npm install --only=dev
+
+      - name: Build Cordova project
+        run: npm run build
+
+      - name: Archive iOS project
+        run: |
+          cd platforms/ios
+          xcodebuild -workspace DNSCryptApp.xcworkspace \
+                     -scheme DNSCryptApp \
+                     -sdk iphoneos \
+                     -configuration Release \
+                     -archivePath build/DNSCryptApp.xcarchive \
+                     archive CODE_SIGNING_ALLOWED=NO
+
+      - name: Export IPA without signing
+        run: |
+          cd platforms/ios
+          xcodebuild -exportArchive \
+                     -archivePath build/DNSCryptApp.xcarchive \
+                     -exportPath build/ipa \
+                     -exportOptionsPlist ../../exportOptions-unsigned.plist
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnscloak-unsigned-ipa
+          path: platforms/ios/build/ipa/*.ipa
