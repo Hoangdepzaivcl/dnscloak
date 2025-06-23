@@ -1,46 +1,23 @@
 #!/bin/bash
 
-# Copyright (C) 2019 Sergey Smirnov
-#
-# This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0. If a copy of the MPL was not distributed with this
-# file, You can obtain one at https://mozilla.org/MPL/2.0/. */
-
 FORCE=0
 VERBOSE=0
 CACHEOFF=0
 
-if [[ "$CORDOVA_CMDLINE" != "" ]]; then
-  if [[ $CORDOVA_CMDLINE == *"--with-framework"* ]]; then
-    FORCE=1
-  fi
-
-  if [[ $CORDOVA_CMDLINE == *"--with-gocache-off"* ]]; then
-    CACHEOFF=1
-  fi
-
-  if [[ $CORDOVA_CMDLINE == *"--verbose"* ]]; then
-    VERBOSE=1
-  fi
-else
-  while [[ "$1" != "" ]]; do
-    case $1 in
-      --force )             FORCE=1
-                            ;;
-      --verbose )           VERBOSE=1
-                            ;;
-      --with-gocache-off )  CACHEOFF=1
-                            ;;
-      * ) exit 1
-    esac
-    shift
-  done
-fi
+while [[ "$1" != "" ]]; do
+  case $1 in
+    --force )             FORCE=1 ;;
+    --verbose )           VERBOSE=1 ;;
+    --with-gocache-off )  CACHEOFF=1 ;;
+    * ) exit 1 ;;
+  esac
+  shift
+done
 
 if [[ "$CORDOVA_CMDLINE" != "" ]]; then
-  PLATFORMPATH="`dirname \"$0\"`/../../platforms/ios/"
+  PLATFORMPATH="$(dirname "$0")/../../platforms/ios/"
 else
-  PLATFORMPATH="`dirname \"$0\"`/../platforms/ios/"
+  PLATFORMPATH="$(dirname "$0")/../platforms/ios/"
 fi
 
 if [[ $FORCE != 1 && -d "${PLATFORMPATH}Dnscryptproxy.framework" ]]; then
@@ -50,93 +27,76 @@ fi
 
 echo "Building Go framework"
 cd "$PLATFORMPATH"
-
 REPOROOT=$(pwd)
 
+# Setup Go build env
 export GOPATH=$REPOROOT/.build
-export PATH=$GOPATH/bin:$PATH
+export PATH="$GOPATH/bin:$(go env GOPATH)/bin:$PATH"
 
-PKGPATH=$GOPATH/src/github.com/jedisct1/dnscrypt-proxy
+PKGPATH="$GOPATH/src/github.com/jedisct1/dnscrypt-proxy"
+GOMOBILE_FLAGS=""
+export GO111MODULE=on
 
-export GOFLAGS="-ldflags=-s -ldflags=-w"
-
-# always rebuild packages
 if [[ $CACHEOFF == 1 ]]; then
   go clean -cache
 fi
 
-# if you want to use a custom built Go...
-#export PATH=$GOPATH/bin:/path/to/your/custom/go/bin:$PATH
-
-# verbose output
 if [[ $VERBOSE == 1 ]]; then
   set -v
   GOMOBILE_FLAGS="-v"
 fi
 
-# create fresh build dir
-rm -fr $GOPATH
-mkdir -p $GOPATH
+# Start clean
+rm -rf "$GOPATH"
+mkdir -p "$GOPATH"
 
-# clean up previous binary
-rm -fr Dnscryptproxy.framework/
+rm -rf Dnscryptproxy.framework/
 
-# fetch & init gomobile
-go get golang.org/x/tools/go/packages
-go get golang.org/x/mobile/cmd/gomobile
-gomobile init
+# Install gomobile if not exists
+if ! command -v gomobile >/dev/null 2>&1; then
+  echo "Installing gomobile..."
+  go install golang.org/x/mobile/cmd/gomobile@latest
+  gomobile init
+fi
 
-# fetch vanilla dnscrypt-proxy
-go get -d 'github.com/jedisct1/dnscrypt-proxy'
-
-# add some mobile-specific flavor
-cd $PKGPATH
-git remote add dnscloak https://github.com/s-s/dnscrypt-proxy.git
+# Clone dnscrypt-proxy
+mkdir -p "$(dirname "$PKGPATH")"
+cd "$(dirname "$PKGPATH")"
+git clone https://github.com/jedisct1/dnscrypt-proxy.git
+cd dnscrypt-proxy
+git remote add dnscloak https://github.com/s-s/dnscrypt-proxy.git || true
 git fetch dnscloak --quiet
 git checkout ios --quiet
 
-# temporary fix for non-vendoring gomobile
-rm -rf $PKGPATH/vendor
+# Prepare source
+cd dnscrypt-proxy
 
-# prepare dnscrypt-proxy sources
-cd $PKGPATH/dnscrypt-proxy
+VERSION_LINE=$(grep 'AppVersion[[:space:]]*=' main.go || echo 'AppVersion = "(unknown)"')
 
-# save version info
-VERSION="$( sed '/AppVersion[[:space:]]*=/!d' main.go )"
-if [[ $VERSION == "" ]]; then
-  VERSION='AppVersion = "(unknown)"'
-fi
+# Clean up
+rm -f main.go *_linux.go *_windows.go privilege*.go
+rm -rf vendor
 
-# remove unused
-rm main.go
-rm *_linux.go
-rm *_windows.go
-rm privilege*.go
+# Rewrite package
+find . -name '*.go' -exec sed -i '' 's/package main/package dnscrypt/g' {} +
+find . -name '*.go' -exec sed -i '' 's/proxy.dropPrivilege/\/\/proxy.dropPrivilege/g' {} +
 
-rm -rf ../vendor/github.com/kardianos/service
+# Copy framework sources
+cp -R "$REPOROOT/../../framework/"* ./
 
-# wrap into package and remove some unnecessaries
-sed -i -- 's/package main/package dnscrypt/g; s/AppVersion/""/g; s/proxy.dropPrivilege/\/\/proxy.dropPrivilege/' *.go
-
-# build a framework
-cd $REPOROOT
-
-# copy files in-place
-cp -R ../../framework/* $PKGPATH/dnscrypt-proxy
-
-# save version info
-cat >$PKGPATH/dnscrypt-proxy/ios/version.go <<EOS
+# Save version
+cat > ios/version.go <<EOS
 package dnscryptproxy
 const (
-  ${VERSION}
+  $VERSION_LINE
 )
 EOS
 
-# check & update deps if required
-go get 'github.com/jedisct1/dnscrypt-proxy/dnscrypt-proxy/ios'
+# Build iOS framework
+gomobile bind -target ios $GOMOBILE_FLAGS ./ios
 
-# make the binary
-gomobile bind -target ios $GOMOBILE_FLAGS 'github.com/jedisct1/dnscrypt-proxy/dnscrypt-proxy/ios'
+# Move final framework
+mv dnscryptproxy.framework "$REPOROOT/Dnscryptproxy.framework"
 
-# clean up build artifacts
-rm -fr $GOPATH
+# Cleanup
+rm -rf "$GOPATH"
